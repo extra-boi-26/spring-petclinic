@@ -25,7 +25,7 @@ jobs:
 
       # Outdated dependency report (Gradle Versions Plugin)
       - name: Outdated dependencies
-        run: ./gradlew dependencyUpdates
+        run: ./gradlew dependencyUpdates --stacktrace --warning-mode=all
 
       # OWASP Dependency-Check (HTML report)
       - name: OWASP CVE scan
