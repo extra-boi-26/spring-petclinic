@@ -19,17 +19,17 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # 3) Cache Gradle (bump key if you change wrapper/plugins)
+      # 3) Cache Gradle
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-v5-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-gradle-v6-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      # 4) Prepare + cache OWASP Dependency-Check data (to avoid repeated NVD downloads)
+      # 4) Prepare + cache OWASP Dependency-Check data
       - name: Prepare Dependency-Check data dir
         run: echo "DC_DATA=$HOME/.dc-data" >> $GITHUB_ENV
 
@@ -37,7 +37,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DC_DATA }}
-          key: ${{ runner.os }}-dcdata-v2
+          key: ${{ runner.os }}-dcdata-v3
           restore-keys: ${{ runner.os }}-dcdata-
 
       # One-time safety: clear corrupt/empty cache so the DB can re-warm cleanly
@@ -48,29 +48,50 @@ jobs:
             mkdir -p "$DC_DATA"
           fi
 
-      # 5) (Debug) list gradle tasks so you can confirm the plugin tasks exist
+      # 5) (Debug) list Gradle tasks
       - name: Show available Gradle tasks
         run: ./gradlew tasks --all
 
-      # 6) Outdated dependency report (requires ben-manes versions plugin in build.gradle)
+      # 6) Outdated dependency report (ben-manes plugin)
       - name: Outdated dependencies
         run: ./gradlew dependencyUpdates --stacktrace --warning-mode=all
 
-      # 7) OWASP CVE scan (inject NVD key both as env var and -D property)
-      - name: OWASP CVE scan
+      # 7) Warm NVD cache with retries (helps avoid "using local data" fallbacks)
+      - name: Warm CVE database (retry x3)
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
           DEPENDENCY_CHECK_NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           echo "NVD key len: ${#NVD_API_KEY} (first 4 chars masked: ${NVD_API_KEY:0:4}****)"
+          set -e
+          for i in 1 2 3; do
+            ./gradlew dependencyCheckUpdate \
+              -Dorg.owasp.dependencycheck.nvd.api.key="${NVD_API_KEY}" \
+              -Dorg.owasp.dependencycheck.data.directory="${DC_DATA}" \
+              -Dorg.owasp.dependencycheck.connectiontimeout=600000 \
+              -Dorg.owasp.dependencycheck.readtimeout=600000 \
+              --info --stacktrace --warning-mode=all && break || {
+                echo "Update attempt $i failed; backing off..."
+                sleep $((i*20))
+              }
+          done
+
+      # 8) Analyze (don’t fail build during prototype; still upload reports)
+      - name: OWASP CVE scan
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          DEPENDENCY_CHECK_NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
           ./gradlew dependencyCheckAnalyze \
             -Dorg.owasp.dependencycheck.nvd.api.key="${NVD_API_KEY}" \
             -Dorg.owasp.dependencycheck.data.directory="${DC_DATA}" \
+            -Dorg.owasp.dependencycheck.connectiontimeout=600000 \
+            -Dorg.owasp.dependencycheck.readtimeout=600000 \
             -Dorg.owasp.dependencycheck.failOnError=false \
             -Dorg.owasp.dependencycheck.failBuildOnCVSS=11 \
             --info --stacktrace --warning-mode=all
 
-      # 8) Always upload reports so you can download them even if a step fails
+      # 9) Always upload reports so you can download them even if a step fails
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
